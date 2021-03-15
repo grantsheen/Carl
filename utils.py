@@ -2,13 +2,7 @@ import torch
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
-from torch.nn.utils.rnn import pad_sequence
 from dataset import ConversationDataset
-
-def pad(examples):
-    """ Pad examples within a batch
-    """
-    return pad_sequence(examples, batch_first=True)
 
 def load_dataset(args, tokenizer, filepath):
     """ Create Conversation Dataset from filepath.
@@ -17,13 +11,12 @@ def load_dataset(args, tokenizer, filepath):
     return ConversationDataset(tokenizer, df, int(args['--block-size']))
 
 def evaluate_ppl(model, dataloader, device, batch_size):
-    """ Calculate perplexity of model on validation or test sentences.
+    """ Calculate loss and perplexity of model on validation or test sentences.
     """
     was_training = model.training
     model.eval()
 
-    total_loss = 0.0
-    total_tgt_words = 0
+    total_loss, total_predictions = 0.0, 0
 
     with torch.no_grad():
         for _, batch in enumerate(tqdm(dataloader)):
@@ -32,18 +25,18 @@ def evaluate_ppl(model, dataloader, device, batch_size):
             inputs = inputs.to(device)
             labels = labels.to(device)
 
-            # calculate loss (avg.)
-            loss = model(inputs, labels=labels)[0]
+            # calculate loss (assumption: avg. per prediction)
+            loss, logits, _ = model(inputs, labels=labels)
             
             # update counts
-            batch_loss = loss * batch_size
-            total_loss += batch_loss
-            words_to_predict = sum(len(s) for s in labels)
-            total_tgt_words += words_to_predict
+            num_predictions = batch_size * logits.shape[1]
+            total_loss += loss * num_predictions
+            total_predictions += num_predictions
 
-        ppl = np.exp(total_loss / total_tgt_words)
+        loss = total_loss / total_predictions
+        ppl = torch.exp(loss)
 
     if was_training:
         model.train()
 
-    return ppl
+    return loss, ppl

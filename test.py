@@ -1,7 +1,8 @@
 import torch
 from os import path
 from torch.utils.data import DataLoader, RandomSampler
-from utils import pad, load_dataset, evaluate_ppl
+from torch.nn.utils.rnn import pad_sequence
+from utils import load_dataset, evaluate_ppl
 from transformers import (
     AutoConfig, 
     AutoModelWithLMHead,
@@ -11,39 +12,50 @@ from transformers import (
 def test(args):
     """ Evaluates perplexity of the model on testing data.
     """
-    config = AutoConfig.from_pretrained(args['--model-name'])
+    pretrained = args['--model-name']
+    finetuned = args['--output-dir']
+    eval_batch_size = int(args['--eval-batch-size'])
+
+    def pad(examples):
+        """ Pad examples within a batch
+        """
+        return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)    
+
+    config = AutoConfig.from_pretrained(pretrained)
     model = AutoModelWithLMHead.from_pretrained(
-        args['--model-name'],
+        pretrained,
         config=config
     )
+    tokenizer = AutoTokenizer.from_pretrained(pretrained, pad_token='<pad>')
+
+    # testing data
+    test_dataset = load_dataset(args, tokenizer, args['--test-data'])
+    test_sampler = RandomSampler(test_dataset)
+    test_dataloader = DataLoader(
+        test_dataset,
+        sampler=test_sampler,
+        batch_size=eval_batch_size,
+        collate_fn=pad,
+        drop_last=True
+    )
+
     if not args['--dialoGPT']:
         # load finetuned model
-        assert(path.exists(args['--model-save-path']))
-        params = torch.load(args['--model-save-path'], map_location=lambda storage, loc: storage)
-        model.load_state_dict(params['state_dict'])
+        assert(path.exists(finetuned))
+        model = AutoModelWithLMHead.from_pretrained(finetuned)
     
     # setup device
     device = torch.device("cuda:0" if args['--cuda'] else "cpu")
     print('use device: %s' % device)
     model = model.to(device)
 
-    # testing data
-    tokenizer = AutoTokenizer.from_pretrained(args['--model-name'])
-    test_dataset = load_dataset(args, tokenizer, args['--test-data'])
-    test_sampler = RandomSampler(test_dataset)
-    test_dataloader = DataLoader(
-        test_dataset,
-        sampler=test_sampler,
-        batch_size=int(args['--batch-size']),
-        collate_fn=pad,
-        drop_last=True
-    )
-
-    ppl = evaluate_ppl(model, test_dataloader, device, batch_size=128)
+    loss, ppl = evaluate_ppl(model, test_dataloader, device, eval_batch_size)
 
     if args['--dialoGPT']:
+        print("Loss of DialoGPT on testing data: %f" % loss)
         print("Perplexity score of DialoGPT on testing data: %f" % ppl)
     else: 
+        print("Loss of finetuned model on testing data: %f" % loss)
         print("Perplexity score of finetuned model on testing data: %f" % ppl)
 
     return

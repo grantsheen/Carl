@@ -1,11 +1,14 @@
 import torch
+import os
 import sys
 import math
 import time
 from typing import Dict
 from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.tensorboard import SummaryWriter
+from torch.nn.utils.rnn import pad_sequence
 from torch.optim import Adam
-from utils import pad, load_dataset, evaluate_ppl
+from utils import load_dataset, evaluate_ppl
 from tqdm import tqdm
 
 from transformers import (
@@ -17,9 +20,13 @@ from transformers import (
 def finetune(args: Dict):
     """ Finetune the DialoGPT Model.
     """
+    tb = SummaryWriter()
+    batch_size, eval_batch_size = int(args['--batch-size']), int(args['--eval-batch-size'])
+    log_every, valid_niter = int(args['--log-every']), int(args['--valid-niter'])
+
     # load pretrained model
     config = AutoConfig.from_pretrained(args['--model-name'])
-    tokenizer = AutoTokenizer.from_pretrained(args['--model-name'])
+    tokenizer = AutoTokenizer.from_pretrained(args['--model-name'], pad_token='<pad>')
     model = AutoModelWithLMHead.from_pretrained(
         args['--model-name'],
         config=config
@@ -31,13 +38,18 @@ def finetune(args: Dict):
     print('use device: %s' % device)
     model = model.to(device)
 
+    def pad(examples):
+        """ Pad examples within a batch
+        """
+        return pad_sequence(examples, batch_first=True, padding_value=tokenizer.pad_token_id)
+
     # training data
     train_dataset = load_dataset(args, tokenizer, args['--train-data'])
     train_sampler = RandomSampler(train_dataset)
     train_dataloader = DataLoader(
         train_dataset,
         sampler=train_sampler,
-        batch_size=int(args['--batch-size']),
+        batch_size=batch_size,
         collate_fn=pad,
         drop_last=True
     )
@@ -48,21 +60,19 @@ def finetune(args: Dict):
     val_dataloader = DataLoader(
         val_dataset,
         sampler=val_sampler,
-        batch_size=int(args['--batch-size']),
+        batch_size=eval_batch_size,
         collate_fn=pad,
         drop_last=True
     )
-
+    
     # Adam optimizer
     optimizer = Adam(model.parameters(), lr=float(args['--lr']))
 
     # initialize parameters
-    total_examples = report_examples = total_tgt_words = report_tgt_words = iter_count = patience = num_trial = 0
-    batch_size, log_every, valid_niter = int(args['--batch-size']), int(args['--log-every']), int(args['--valid-niter'])
-    model_save_path = args['--model-save-path']
-    total_loss = report_loss = 0.0
+    global_step = patience = num_trial = 0
+    logging_loss, logging_predictions = 0.0, 0
     best_ppl = float('inf')
-    train_time = begin_time = time.time()
+    output_dir = args['--output-dir']
 
     # finetune model
     print('begin finetuning!')
@@ -73,8 +83,8 @@ def finetune(args: Dict):
             inputs = inputs.to(device)
             labels = labels.to(device)
 
-            # calculate loss (avg.)
-            loss = model(inputs, labels=labels)[0]
+            # calculate loss (assumption: avg. per prediction)
+            loss, logits, _ = model(inputs, labels=labels)
 
             # optimizer step
             optimizer.zero_grad()
@@ -83,48 +93,43 @@ def finetune(args: Dict):
             optimizer.step()
 
             # update counts
-            batch_loss = loss * batch_size
-            report_loss += batch_loss
-            total_loss += batch_loss
-            report_examples += batch_size
-            total_examples += batch_size
-            words_to_predict = sum(len(s) for s in labels)
-            report_tgt_words += words_to_predict
-            total_tgt_words += words_to_predict
-            iter_count += 1
+            num_predictions = batch_size * logits.shape[1]
+            batch_loss = loss * num_predictions
+            logging_loss += batch_loss
+            logging_predictions += num_predictions
+            global_step += 1
 
             # logging
-            if iter_count % log_every == 0:
-                print('epoch %d, iter %d, avg. loss %.2f, avg. ppl %.2f ' \
-                      'tot. examples %d, speed %.2f words/sec, time elapsed %.2f sec' % (epoch, iter_count,
-                                                                                         report_loss / report_examples,
-                                                                                         torch.exp(report_loss / report_tgt_words),
-                                                                                         total_examples,
-                                                                                         report_tgt_words / (time.time() - train_time),
-                                                                                         time.time() - begin_time))
-                train_time = time.time()
-                report_loss = 0.0
-                report_examples = report_tgt_words = 0                                                                        
+            if global_step % log_every == 0:
+                avg_loss = logging_loss / logging_predictions
+                tb.add_scalar('loss', avg_loss, global_step)
 
+                avg_ppl = torch.exp(avg_loss)
+                tb.add_scalar('ppl', avg_ppl, global_step)
+
+                print('epoch %d, iter %d, avg. loss %.2f, avg. ppl %.2f' % (epoch, global_step, avg_loss, avg_ppl))
+
+                logging_loss, logging_predictions = 0.0, 0
+                                                                           
             # perform validation
-            if iter_count % valid_niter == 0:
-                print('epoch %d, iter %d, tot. loss %.2f, tot. ppl %.2f tot. examples %d' % (epoch, iter_count,
-                                                                                            total_loss / total_examples,
-                                                                                            torch.exp(total_loss / total_tgt_words),
-                                                                                            total_examples))
-                total_loss = 0.0
-                total_examples = total_tgt_words = 0
-
+            if global_step % valid_niter == 0:
                 print('begin validation ...')
-                val_ppl = evaluate_ppl(model, val_dataloader, device, batch_size=128)
-                print('validation: iter %d, val. ppl %f' % (iter_count, val_ppl))
+                val_loss, val_ppl = evaluate_ppl(model, val_dataloader, device, eval_batch_size)
+                print('validation: iter %d, val. loss %.2f, val. ppl %.2f' % (global_step, val_loss, val_ppl))
+
+                tb.add_scalar('val. loss', val_loss, global_step)
+                tb.add_scalar('val. ppl', val_ppl, global_step)  
                 
                 if val_ppl < best_ppl:
+                    tb.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)             
                     best_ppl = val_ppl
                     patience = 0
-                    print('save the current best model to [%s]' % model_save_path)
-                    model.save(model_save_path)
-                    torch.save(optimizer.state_dict(), model_save_path + '.optim')
+
+                    # save current best model and optimizer
+                    print('save the current best model to [%s]' % output_dir)
+                    os.makedirs(output_dir, exist_ok=True) 
+                    model.save_pretrained(output_dir)
+                    torch.save(optimizer.state_dict(), output_dir + '.optim')
                 elif patience < int(args['--patience']):
                     patience += 1
                     print('hit patience %d' % patience)
@@ -135,21 +140,22 @@ def finetune(args: Dict):
                         print('hit #%d trial' % num_trial)
                         if num_trial == int(args['--max-num-trial']):
                             print('early stop!')
+                            tb.close()
                             exit(0)
 
                         # decay lr
                         lr = optimizer.param_groups[0]['lr'] * float(args['--lr-decay'])
+                        tb.add_scalar('lr', lr, global_step)
                         print('decay learning rate to %f' % lr)
 
                         # restore model from previous best checkpoint
                         print('load previous best model')
-                        params = torch.load(model_save_path, map_location=lambda storage, loc: storage)
-                        model.load_state_dict(params['state_dict'])
+                        model = AutoModelWithLMHead.from_pretrained(output_dir)
                         model = model.to(device)
                         
                         # restore optimizer from previous best checkpoint
                         print('restore optimizer parameters')
-                        optimizer.load_state_dict(torch.load(model_save_path + '.optim'))
+                        optimizer.load_state_dict(torch.load(output_dir + '.optim'))
 
                         # set new lr
                         for param_group in optimizer.param_groups:
@@ -157,6 +163,7 @@ def finetune(args: Dict):
 
                         # reset patience
                         patience = 0
-                
+               
     print('reached maximum number of epochs!')
+    tb.close() 
     return 

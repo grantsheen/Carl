@@ -2,6 +2,7 @@ import torch
 from os import path
 from typing import Dict
 from transformers import (
+    AutoConfig,
     AutoModelWithLMHead, 
     AutoTokenizer,
 )
@@ -9,16 +10,22 @@ from transformers import (
 def demo(args):
     """ Chatbot demo!
     """
-    tokenizer = AutoTokenizer.from_pretrained(args['--model-name'])
-    model = AutoModelWithLMHead.from_pretrained(args['--model-name'])
+    pretrained = args['--model-name']
+    finetuned = args['--output-dir']
+
+    config = AutoConfig.from_pretrained(pretrained)
+    model = AutoModelWithLMHead.from_pretrained(
+        pretrained,
+        config=config
+    )
+    tokenizer = AutoTokenizer.from_pretrained(pretrained, pad_token='<pad>')
 
     if args['--dialoGPT']:
         name = 'DialoGPT'
     else:
         # load finetuned model
-        assert(path.exists(args['--model-save-path']))
-        params = torch.load(args['--model-save-path'], map_location=lambda storage, loc: storage)
-        model.load_state_dict(params['state_dict'])
+        assert(path.exists(finetuned))
+        model = AutoModelWithLMHead.from_pretrained(finetuned)
         name = 'Roger'
 
     for step in range(int(args['--num-lines'])):
@@ -28,12 +35,12 @@ def demo(args):
         # append the new user input tokens to the chat history
         bot_input_ids = torch.cat([chat_history_ids, new_user_input_ids], dim=-1) if step > 0 else new_user_input_ids
 
-        # generated a response while limiting the total chat history to 1000 tokens, 
+        # generated a response while limiting the total chat history to 500 tokens, 
         chat_history_ids = model.generate(
             bot_input_ids, 
-            max_length=50,
+            max_length=500,
             top_p=0.95,
-            pad_token_id=tokenizer.eos_token_id
+            pad_token_id=tokenizer.pad_token_id
         )
 
         # pretty print last ouput tokens from bot
