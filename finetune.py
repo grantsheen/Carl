@@ -7,7 +7,7 @@ from typing import Dict
 from torch.utils.data import DataLoader, RandomSampler
 from torch.utils.tensorboard import SummaryWriter
 from torch.nn.utils.rnn import pad_sequence
-from torch.optim import Adam
+from torch.optim import Adam, AdamW, SGD
 from utils import load_dataset, evaluate_ppl
 from tqdm import tqdm
 
@@ -26,7 +26,7 @@ def finetune(args: Dict):
 
     # load pretrained model
     config = AutoConfig.from_pretrained(args['--model-name'])
-    tokenizer = AutoTokenizer.from_pretrained(args['--model-name'], pad_token='<pad>')
+    tokenizer = AutoTokenizer.from_pretrained(args['--model-name'], pad_token='00000')
     model = AutoModelWithLMHead.from_pretrained(
         args['--model-name'],
         config=config
@@ -65,8 +65,14 @@ def finetune(args: Dict):
         drop_last=True
     )
     
-    # Adam optimizer
-    optimizer = Adam(model.parameters(), lr=float(args['--lr']))
+    # # Adam optimizer
+    # optimizer = Adam(model.parameters())
+
+    # # AdamW optimizer
+    # optimizer = AdamW(model.parameters(), weight_decay=0.05)
+
+    # SGD optimizer
+    optimizer = SGD(model.parameters(), lr=float(args['--lr']), momentum=0.9)
 
     # initialize parameters
     global_step = patience = num_trial = 0
@@ -123,7 +129,7 @@ def finetune(args: Dict):
                 if val_ppl < best_ppl:
                     tb.add_scalar('lr', optimizer.param_groups[0]['lr'], global_step)             
                     best_ppl = val_ppl
-                    patience = 0
+                    patience, num_trial = 0, 0
 
                     # save current best model and optimizer
                     print('save the current best model to [%s]' % output_dir)
@@ -140,6 +146,9 @@ def finetune(args: Dict):
                         print('hit #%d trial' % num_trial)
                         if num_trial == int(args['--max-num-trial']):
                             print('early stop!')
+                            print('load previous best model')
+                            model = AutoModelWithLMHead.from_pretrained(output_dir)
+                            model = model.to(device)
                             tb.close()
                             exit(0)
 

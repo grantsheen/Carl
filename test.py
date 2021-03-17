@@ -28,6 +28,13 @@ def test(args):
     )
     tokenizer = AutoTokenizer.from_pretrained(pretrained, pad_token='<pad>')
 
+    if not args['--dialoGPT']:
+        # load finetuned model
+        assert(path.exists(finetuned))
+        model = AutoModelWithLMHead.from_pretrained(finetuned)
+        tokenizer = AutoTokenizer.from_pretrained(pretrained, pad_token='00000')
+        
+
     # testing data
     test_dataset = load_dataset(args, tokenizer, args['--test-data'])
     test_sampler = RandomSampler(test_dataset)
@@ -38,11 +45,6 @@ def test(args):
         collate_fn=pad,
         drop_last=True
     )
-
-    if not args['--dialoGPT']:
-        # load finetuned model
-        assert(path.exists(finetuned))
-        model = AutoModelWithLMHead.from_pretrained(finetuned)
     
     # setup device
     device = torch.device("cuda:0" if args['--cuda'] else "cpu")

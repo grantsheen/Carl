@@ -24,11 +24,11 @@ Options:
     --eval-batch-size=<int>                 eval batch size [default: 16]
     --clip-grad=<float>                     gradient clipping [default: 5.0]
     --log-every=<int>                       log every [default: 100]
-    --max-epoch=<int>                       max epoch [default: 10]
+    --max-epoch=<int>                       max epoch [default: 15]
     --seed=<int>                            seed [default: 42]
-    --patience=<int>                        wait for how many iterations to decay learning rate [default: 3]
-    --max-num-trial=<int>                   terminate training after how many trials [default: 3]
-    --valid-niter=<int>                     perform validation after how many iterations [default: 500]
+    --patience=<int>                        wait for how many iterations to decay learning rate [default: 1]
+    --max-num-trial=<int>                   terminate training after how many trials [default: 5]
+    --valid-niter=<int>                     perform validation after how many iterations [default: 1000]
     --num-lines=<int>                       number of lines to chat in demo [default: 10]
 """
 from docopt import docopt
